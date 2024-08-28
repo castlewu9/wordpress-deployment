@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress
+  labels:
+    app: wordpress
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wordpress
+  template:
+    metadata:
+      labels:
+        app: wordpress
+    spec:
+      containers:
+        - name: wordpress
+          image: wordpress:apache # Assuming Apache-based WordPress image
+          ports:
+            - containerPort: 443
+          volumeMounts:
+            - name: ca-certificates
+              mountPath: /usr/local/share/ca-certificates/
+            - name: ssl-certificates
+              mountPath: /etc/ssl/certs/
+          env:
+            - name: WORDPRESS_HTTP_PORT
+              value: "443"
+            - name: WORDPRESS_HTTPS_PORT
+              value: "443"
+            - name: WORDPRESS_CONFIG_EXTRA
+              value: |
+                define('FORCE_SSL_ADMIN', true);
+                if (strpos($_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) {
+                  $_SERVER['HTTPS'] = 'on';
+                }
+      initContainers:
+        - name: setup-apache-ssl
+          image: ubuntu:latest
+          command:
+            [
+              "sh",
+              "-c",
+              "apt-get update && apt-get install -y apache2 && cp /setup-ssl.sh /setup-ssl.sh && chmod +x /setup-ssl.sh && /setup-ssl.sh",
+            ]
+          volumeMounts:
+            - name: setup-script
+              mountPath: /setup-ssl.sh
+              subPath: setup-ssl.sh
+            - name: ssl-certificates
+              mountPath: /etc/ssl/certs/
+      volumes:
+        - name: custom-ca
+          secret:
+            secretName: custom-ca-secret
+        - name: ca-certificates
+          emptyDir: {}
+        - name: ssl-certificates
+          secret:
+            secretName: wordpress-tls-secret
+        - name: setup-script
+          configMap:
+            name: setup-script-configmap
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: setup-script-configmap
+data:
+  setup-ssl.sh: |
+    #!/bin/bash
+    a2enmod ssl
+    a2enmod rewrite
+    cat <<EOF > /etc/apache2/sites-available/wordpress-ssl.conf
+    <VirtualHost *:443>
+        ServerName your-domain.com
+        DocumentRoot /var/www/html
+        SSLEngine on
+        SSLCertificateFile /etc/ssl/certs/tls.crt
+        SSLCertificateKeyFile /etc/ssl/certs/tls.key
+        <Directory /var/www/html>
+            AllowOverride All
+        </Directory>
+    </VirtualHost>
+    EOF
+    a2ensite wordpress-ssl.conf
+    service apache2 restart
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: custom-ca-secret
+type: Opaque
+data:
+  ca.crt: <base64-encoded-ca-cert>
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wordpress-tls-secret
+type: kubernetes.io/tls
+data:
+  tls.crt: <base64-encoded-company-cert>
+  tls.key: <base64-encoded-company-key>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  labels:
+    app: wordpress
+spec:
+  ports:
+    - port: 443
+      targetPort: 443
+      protocol: TCP
+      name: https
+  selector:
+    app: wordpress
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: wordpress-route
+spec:
+  host: your-domain.com # Replace with your domain
+  to:
+    kind: Service
+    name: wordpress
+  port:
+    targetPort: https
+  tls:
+    termination: passthrough
